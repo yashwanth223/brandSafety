@@ -6,7 +6,7 @@ from urllib.error import URLError, HTTPError
 from html.parser import HTMLParser
 import os
 import boto3
-#change
+
 # Read this from Lambda environment variables (Configuration > Environment variables)
 BUCKET = os.getenv("CONTENT_BUCKET", "")
 
