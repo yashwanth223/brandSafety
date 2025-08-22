@@ -6,9 +6,10 @@ from urllib.error import URLError, HTTPError
 from html.parser import HTMLParser
 import os
 import boto3
-#change
-# Read this from Lambda environment variables (Configuration > Environment variables)
+
+# Read from Lambda environment variables
 BUCKET = os.getenv("CONTENT_BUCKET", "")
+OUTPUT_PREFIX = os.getenv("OUTPUT_PREFIX", "raw/")  # NEW: keep inputs under raw/
 
 # --- Simple HTML text extractor (no external libs) ---
 class TextExtractor(HTMLParser):
@@ -40,17 +41,14 @@ class TextExtractor(HTMLParser):
             return
         if self._in_title:
             text = data.strip()
-            if text:
-                # keep first non-empty title we see
-                if self.title is None:
-                    self.title = text
+            if text and self.title is None:
+                self.title = text
             return
         if data and data.strip():
             self.parts.append(data.strip())
 
     def get_text(self):
         text = "\n".join(self.parts)
-        # collapse too many newlines
         text = re.sub(r"\n{3,}", "\n\n", text)
         return text.strip()
 
@@ -59,10 +57,10 @@ def _slugify(text: str, max_len: int = 60) -> str:
     text = re.sub(r"[^a-z0-9\-]+", "", text)
     return (text[:max_len].strip("-")) or "page"
 
-def fetch_url(url: str, timeout_sec: int = 20) -> str:
+def fetch_url(url: str, timeout_sec: int = 25) -> str:
     req = Request(
         url,
-        headers={"User-Agent": "LambdaContentFetcher/1.0 (+https://aws.amazon.com/lambda/)"}
+        headers={"User-Agent": "Mozilla/5.0 (compatible; LambdaContentFetcher/1.1)"},
     )
     with urlopen(req, timeout=timeout_sec) as resp:
         charset = resp.headers.get_content_charset() or "utf-8"
@@ -85,11 +83,10 @@ def save_json_to_s3(bucket: str, key: str, record: dict):
     return f"s3://{bucket}/{key}"
 
 def lambda_handler(event, context):
-    # 1) Validate bucket config
     if not BUCKET:
         return {"statusCode": 500, "body": "Please set CONTENT_BUCKET environment variable."}
 
-    # 2) Get URL from event
+    # Get URL from event or query string
     url = None
     if isinstance(event, dict):
         url = event.get("url")
@@ -99,9 +96,9 @@ def lambda_handler(event, context):
     if not url:
         return {"statusCode": 400, "body": "Provide 'url' in the event or as query parameter."}
 
-    # 3) Fetch and parse
+    # Fetch & parse
     try:
-        html = fetch_url(url,30)
+        html = fetch_url(url, 30)
     except HTTPError as e:
         return {"statusCode": e.code, "body": f"HTTPError fetching URL: {e}"}
     except URLError as e:
@@ -111,16 +108,16 @@ def lambda_handler(event, context):
 
     title, text = extract_text_and_title(html)
 
-    # 4) Build S3 key
+    # Build S3 key under raw/ to avoid classifier loop
     host = urlparse(url).netloc.replace("www.", "")
     date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     base = _slugify(title or "page")
-    key = f"{date}/{host}/{base}-{uuid.uuid4().hex[:8]}.json"
+    key = f"{OUTPUT_PREFIX}{date}/{host}/{base}-{uuid.uuid4().hex[:8]}.json"
 
-    # 5) Create record and save to S3
     record = {
         "meta": {
             "source_url": url,
+            "host": host,  # NEW
             "title": title,
             "fetched_at": datetime.now(timezone.utc).isoformat(),
             "content_length": len(html),
@@ -132,9 +129,8 @@ def lambda_handler(event, context):
     }
 
     uri = save_json_to_s3(BUCKET, key, record)
-    # 6) Return success response
 
     return {
         "statusCode": 200,
-        "body": json.dumps({"saved_to": uri, "title": title})
+        "body": json.dumps({"saved_to": uri, "bucket": BUCKET, "key": key, "title": title})
     }
