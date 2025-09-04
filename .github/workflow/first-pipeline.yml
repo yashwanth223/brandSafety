@@ -24,3 +24,6 @@ jobs:
 
       - name: Run tests
         run: pytest -q
+        
+      - name: Run app.py
+        run: python app.py
